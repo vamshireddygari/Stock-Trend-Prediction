@@ -1,4 +1,4 @@
-# StockTrendPrediction
+# Stock Trend Prediction
 
 
 Step 1: Copy the files in the data folder to your local machine and set this path as working directory in both the Rmd files. This can be done by changing the pwd variable in both the files.
