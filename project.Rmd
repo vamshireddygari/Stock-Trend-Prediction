@@ -1,0 +1,350 @@
+---
+title: "Project"
+author: "Shashank Pavan Segu"
+date: "December 12, 2016"
+output: html_document
+---
+library(jsonlite)
+library(XML)
+library(RCurl)
+library(dplyr)
+library(lubridate)
+library(tm)
+library(SnowballC)
+library(RWeka)
+library(RTextTools)
+library(plotly)
+
+#Setting current working directory
+pwd <- "SET YOUR PROJECT DIRECTORY HERE"
+setwd(pwd)
+
+#stockData.csv has stock related data - Date, Open, Close, Volume, High, Low. This data is loaded into dataframe rawStockData
+rawStockData          <- read.csv(file="stockData.csv", header=TRUE, sep=",")
+
+#processedFeedNYT.csv has news related data - Publised Date, Published Hour, Title, Description. This data is loaded into dataframe rawProcessedDataNYT
+rawProcessedDataNYT   <- read.csv(file="processedFeedNYT.csv", header=FALSE, sep=",")
+
+#Adding column names to the dataframe
+rawProcessedDataNYT   <- setNames(rawProcessedDataNYT, c("Date", "Hour", "Title", "Description"))
+
+
+#To remove duplicates below code is used
+uniqueNewsNYT         <- data.frame(matrix(ncol = 4))
+uniqueNewsNYT         <- setNames(uniqueNewsNYT, c("Date", "Hour", "Title", "Description"))
+
+
+flag  <- 0
+count <- 0
+for(i in 1:NROW(rawProcessedDataNYT)){
+  if(i != NROW(rawProcessedDataNYT) && as.character(rawProcessedDataNYT$Title[i]) == as.character(rawProcessedDataNYT$Title[i + 1]) && as.character(rawProcessedDataNYT$Date[i]) == as.character(rawProcessedDataNYT$Date[i + 1])){
+    uniqueNewsNYT[i - count, "Date"]        <- as.character(rawProcessedDataNYT$Date[i])
+    uniqueNewsNYT[i - count, "Title"]       <- as.character(rawProcessedDataNYT$Title[i])
+    uniqueNewsNYT[i - count, "Description"] <- as.character(rawProcessedDataNYT$Description[i])
+    if(as.character(rawProcessedDataNYT$Hour[i]) < as.character(rawProcessedDataNYT$Hour[i + 1])){
+      uniqueNewsNYT[i - count, "Hour"]      <- as.character(rawProcessedDataNYT$Hour[i])
+    }else{
+      uniqueNewsNYT[i - count, "Hour"]      <- as.character(rawProcessedDataNYT$Hour[i + 1])
+    }
+    count <- count + 1
+    flag  <- 1
+  }else{
+    if(flag == 0){
+      uniqueNewsNYT[i - count, "Date"]        <- as.character(rawProcessedDataNYT$Date[i])
+      uniqueNewsNYT[i - count, "Title"]       <- as.character(rawProcessedDataNYT$Title[i])
+      uniqueNewsNYT[i - count, "Description"] <- as.character(rawProcessedDataNYT$Description[i])
+      uniqueNewsNYT[i - count, "Hour"]        <- as.character(rawProcessedDataNYT$Hour[i] )
+    }else{
+      flag  <- 0
+    }
+  }
+}
+
+
+#TrendFunction - is a function that calculates trend as positive or negative based on initial and final value
+trendFunction <- function(initial, final){
+  if(as.numeric(initial) < as.numeric(final)){
+    return("pos")
+  }else{
+    return("neg")
+  }
+}
+
+#TrendMagnitudeFunction - is a function that calculates percentage change of stock price given two price values
+trendMagnitudeFunction <- function(initial, final){
+  return (((as.numeric(final) - as.numeric(initial)) / as.numeric(initial)) * 100)
+}
+
+
+#Calculating the percentage change of the stock price and the trend when a news was published
+helper_data_frame   <- data.frame(matrix(ncol = 2))
+
+for(i in 1:NROW(uniqueNewsNYT)){
+  for(j in 1:NROW(rawStockData)){
+    if(as.character(uniqueNewsNYT$Date[i]) == as.character(rawStockData$Date[j])){
+      if(as.numeric(uniqueNewsNYT$Hour[i]) > 9 && as.numeric(uniqueNewsNYT$Hour[i] < 16)){
+        trend   <- trendFunction(rawStockData$Open[j], rawStockData$Close[j])
+        helper_data_frame[i, 1] <- trendFunction(rawStockData$Open[j], rawStockData$Close[j])
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(rawStockData$Open[j], rawStockData$Close[j])
+      }else if(as.numeric(uniqueNewsNYT$Hour[i]) > 15 && j != length(rawStockData)){
+        trend   <- trendFunction(rawStockData$Close[j], rawStockData$Open[j - 1])
+        helper_data_frame[i, 1] <- trendFunction(rawStockData$Close[j], rawStockData$Open[j - 1])
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(rawStockData$Close[j], rawStockData$Open[j - 1])
+      }else if(as.numeric(uniqueNewsNYT$Hour[i]) < 10 && j != 0){
+        trend   <- trendFunction(rawStockData$Close[j + 1], rawStockData$Open[j])
+        helper_data_frame[i, 1] <- trendFunction(rawStockData$Close[j + 1], rawStockData$Open[j])
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(rawStockData$Close[j + 1], rawStockData$Open[j])
+      }
+    }
+    else{
+      if((mdy(uniqueNewsNYT$Date[i]) < mdy(rawStockData$Date[j])) && (mdy(uniqueNewsNYT$Date[i]) > mdy(rawStockData$Date[j + 1]))){
+        helper_data_frame[i, 1] <- trendFunction(as.numeric(rawStockData$Close[j + 1]), as.numeric(rawStockData$Open[j]))
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(as.numeric(rawStockData$Close[j + 1]), as.numeric(rawStockData$Open[j]))
+      }
+    }
+  }
+}
+
+#adding two columns to uniqueNewsNYT
+#Trend - positive or negative
+#MagnitudeTrend - percentage trend of the stock when the news was published
+uniqueNewsNYT[, "Trend"]            <- helper_data_frame[,1]
+uniqueNewsNYT[, "MagnitudeTrend"]   <- helper_data_frame[,2]
+uniqueNewsNYT                       <- na.omit(uniqueNewsNYT)
+
+#The news dataset is not in the chronological order.
+#To get the dataset in the order below code is used
+orderedNewsNYT        <- tbl_df(uniqueNewsNYT)
+orderedNewsNYT        <- arrange(orderedNewsNYT, desc(mdy(Date)), desc(as.numeric(Hour)))
+
+orderedNewsNYT        <- as.data.frame(orderedNewsNYT)
+
+#As Description field is not used in our analysis, we are dropping the column
+drops <- c("Description")
+orderedNewsNYT <- orderedNewsNYT[ , !(names(orderedNewsNYT) %in% drops)]
+
+#Checking for null values
+checkingForNull       <- orderedNewsNYT[!complete.cases(orderedNewsNYT)]
+
+
+#Reading the sentiment of news title present in the file - COntentSentimentAndScore
+sentiment <- read.csv(file="ContentSentimentAndScore.csv", header=TRUE, sep=",")
+
+predictor_sentiment = data.frame(matrix(ncol = 2))
+
+for (i in 1:NROW(orderedNewsNYT)){
+  for(j in 1:NROW(sentiment)){
+    if(as.character(orderedNewsNYT$Title[i]) == as.character(sentiment$Headline[j])){
+      predictor_sentiment[i, 1] <- as.character(orderedNewsNYT$Title[i])
+      if(as.character(sentiment$ContentSentiment[j]) != "neutral"){
+        predictor_sentiment[i, 2] <- as.character(sentiment$ContentSentiment[j])
+      }else{
+        if(as.numeric(sentiment$ScoreContentSentiment[j]) < 0){
+          predictor_sentiment[i, 2] <- "negative"
+        }else{
+          predictor_sentiment[i, 2] <- "positive"
+        }
+      }
+    }
+  }
+}
+
+orderedNewsNYT[, "sentiment"] <- predictor_sentiment[, 2]
+
+#Creating a dataframe that will have title and the sentiment.
+#This dataframe is fed to the SVM classifier
+help_label <- data.frame(matrix(ncol = 2))
+
+#Assigning column names to the dataset that will be fed to SVM classifier
+help_label <- setNames(help_label, c("Title", "Sentiment"))
+
+#Convert positive - 1, negative - 0
+for(i in 1:NROW(predictor_sentiment)){
+  help_label[i, 1] <- as.character(predictor_sentiment$X1[i])
+  if(as.character(predictor_sentiment$X2[i]) == "positive"){
+    help_label[i, 2] <- 1
+  }else{
+    help_label[i, 2] <- 0
+  }
+}
+
+
+#Reversing the order of the rows
+#This is done because initial dataset starts from the latest to oldest
+#In ordere to feed the dataset, we should have dataset that starts from the oldest to the latest
+help_label <- help_label[rev(rownames(help_label)),]
+orderedNewsNYT <- orderedNewsNYT[rev(rownames(orderedNewsNYT)),]
+
+#Dividing data into News title and Sentiment
+train_out.data <- help_label$Sentiment
+train_txt.data <- help_label$Title
+
+#Size of the sample dataset
+train.num   <- 314
+
+#Building SVM Classifier by using unigram
+#Dataset is divided in the ratio 70 : 30
+#70 percent of the dataset is used to train SVM classifier
+#30 percent of the dataset is considered as testing dataset
+matrix_1 <- create_matrix(train_txt.data, language='english', removeNumbers=TRUE, stemWords=TRUE, removePunctuation=TRUE, toLower = TRUE, ngramLength = 1)
+container_1 <- create_container(matrix_1, t(train_out.data), trainSize = 1:(train.num - 90), testSize = (train.num - 89):train.num, virgin = FALSE)
+
+svm.model_1 <- train_model(container_1, "SVM")
+svm.result_1 <- classify_model(container_1, svm.model_1)
+
+svm_analytic_1 <- create_analytics(container_1, svm.result_1)
+
+#SVM Classifier - Precision and Recall for Negative sentiment and Positive Sentiment 
+#1 - Positive Sentiment
+#0 - Negative Sentiment
+svm_analytic_1
+
+# push - push to the end of the list
+push <- function(list, element){
+  list <- c(list, element)
+  return(unlist(list))
+}
+
+
+#CreateNegativeList is a function where it gets percentage change of the most recent 10 negative sentiment news from the past dataset
+createNegativeList <- function(index){
+  negativelist <- list()
+  while(index > 0){
+    if(orderedNewsNYT$sentiment[index] == "negative" && (NROW(unlist(negativelist)) < 10)){
+      negativelist <- push(negativelist, orderedNewsNYT$MagnitudeTrend[index])
+    }else if(NROW(unlist(negativelist)) == 10){
+      break
+    }
+    index <- index - 1
+  }
+  return(unlist(negativelist))
+}
+
+
+#CreatePositiveList is a function where it gets percentage change of the most recent 10 positive sentiment news from the past dataset
+createPositiveList <- function(index){
+  positivelist <- list()
+  while(index > 0){
+    if(orderedNewsNYT$sentiment[index] == "positive" && (NROW(unlist(positivelist)) < 10)){
+      positivelist <- push(positivelist, orderedNewsNYT$MagnitudeTrend[index])
+    }else if(NROW(unlist(positivelist)) == 10){
+      break
+    }
+    index <- index - 1
+  }
+  return(positivelist)
+}
+
+
+#Calculate_wma - is a function which calculates weighted moving average based on the sentiment predicted by the SVM classifier
+#When the SVM classifier predicts negative, then calculate_wma function calls createNegativeList and calculates weighted moving average for the recent negative news from the past dataset.
+#Similarly, when the classifier predicts positive, then calculate_wma function class createPositiveList and calculate weighted moving average for the recent positive news from the past dataset.
+#Weights - 10/55, 9/55, 8/55, 7/55, 6/55, 5/55, 4/55, 3/55, 2/55, 1/55
+#more weight is added to the most recent news and the weight gradually fades out linearly.
+
+calculate_wma <- function(testingValue, index){
+  if(testingValue == 0){
+    helper_list <- createNegativeList(index - 1)
+  }else if(testingValue == 1){
+    helper_list <- createPositiveList(index - 1)
+  }
+  value <- (helper_list[1] * (10 / 55)) + (helper_list[2] * (9 / 55)) + (helper_list[3] * (8 / 55)) + (helper_list[4] * (7 / 55)) + (helper_list[5] * (6 / 55)) + (helper_list[6] * (5 / 55)) + (helper_list[7] * (4 / 55)) + (helper_list[8] * (3 / 55)) + (helper_list[9] * (2 / 55)) + (helper_list[10] * (1 / 55))
+  return(value)
+}
+
+
+#final_result is a list that contains the predicted percentage change of yahoo stock with respect to the predicted sentiment from SVM classifier
+final_result <- list()
+for(i in 1:NROW(svm.result_1)){
+  final_result <- push(final_result, calculate_wma(svm.result_1$SVM_LABEL[i], 224 + i))
+}
+
+#Grouped Bar Graph
+#Plot that tells how our model has predicted the percentage change of the stock price of yahoo based on the sentiment of SVM Classifier and also the actual percentage change that happened when the news was published.
+datelist <- list()
+for(i in 225:NROW(orderedNewsNYT$Date)){
+     datelist[length(datelist) + 1] <- list(paste(as.character(mdy(orderedNewsNYT$Date[i])), " - ", as.character(i)))
+}
+datelist <- unlist(datelist)
+
+f1 <- list(
+  family = "Arial, sans-serif",
+  size = 18,
+  color = "blue"
+)
+
+f2 <- list(
+  family = "Arial, sans-serif",
+  size = 10,
+  color = "black"
+)
+
+ax <- list(
+  title = "Date",
+  titlefont = f1,
+  ticks = "outside",
+  tickangle = 30,
+  tickfont = f2
+)
+
+data = data.frame(datelist, orderedNewsNYT$MagnitudeTrend[225:314], final_result)
+
+p <- plot_ly(data, x = ~datelist, y = ~orderedNewsNYT$MagnitudeTrend[225:314], type = 'bar', name = "Actual Percentage change") %>% add_trace(y = ~final_result, name = "Predicted Percentage change") %>% layout(yaxis = list(title = 'PercentageChange'), xaxis = ax, barmode = 'group', bargap = 0.5)
+p
+
+
+#Evaluation of our model
+final_help_data_frame <- data.frame(matrix(ncol = 2))
+final_help_data_frame <- setNames(final_help_data_frame, c("ActualTrend", "PredictedTrend"))
+for(i in 1:NROW(final_result)){
+  if(final_result[i] < 0){
+    final_help_data_frame[i, 2] <- "negative"
+  }else{
+    final_help_data_frame[i, 2] <- "positive"
+  }
+  final_help_data_frame[i, 1] <- orderedNewsNYT$Trend[224 + i]
+}
+
+#count_tn - has how many true negatives are present
+#count_tp - has how many true positives are present
+#count_fp - has how many false positives are present
+#count_fn - has how many false negatives are present
+count_tn <- 0
+count_tp <- 0
+count_fp <- 0
+count_fn <- 0
+for(i in 1:NROW(final_help_data_frame)){
+  if(final_help_data_frame$ActualTrend[i] == "neg" && final_help_data_frame$PredictedTrend[i] == "negative"){
+    count_tn <- count_tn + 1
+  }else if(final_help_data_frame$ActualTrend[i] == "pos" && final_help_data_frame$PredictedTrend[i] == "positive"){
+    count_tp <- count_tp + 1
+  }else if(final_help_data_frame$PredictedTrend[i] == "positive" && final_help_data_frame$ActualTrend[i] == "neg"){
+    count_fp <- count_fp + 1
+  }else if(final_help_data_frame$PredictedTrend[i] == "negative" && final_help_data_frame$ActualTrend[i] == "pos"){
+    count_fn <- count_fn + 1
+  }
+}
+
+#Positives
+#Precision
+pp <- count_tp / (count_tp + count_fp)
+pp
+#Recall
+rp <- count_tp / (count_tp + count_fn)
+rp
+
+#F1-measure
+f1p <- (2 * pp * rp) / (pp + rp)
+f1p
+
+#Negatives
+#Precision
+pn <- count_tn / (count_tn + count_fn)
+pn
+#Recall
+rn <- count_tn / (count_tn + count_fp)
+rn
+
+#F1-measure
+f1n <- (2 * pn * rn) / (pn + rn)
+f1n

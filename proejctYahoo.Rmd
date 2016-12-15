@@ -1,0 +1,303 @@
+---
+title: "Yahoo"
+author: "Shashank Pavan Segu"
+date: "December 12, 2016"
+output: html_document
+---
+
+library(jsonlite)
+library(XML)
+library(RCurl)
+library(dplyr)
+library(lubridate)
+library(tm)
+library(SnowballC)
+library(RWeka)
+library(RTextTools)
+library(plotly)
+
+#Setting current working directory
+pwd <- "SET YOUR PROJECT DIRECTORY HERE"
+setwd(pwd)
+
+#Yahoo Finance
+
+#RawstockData has stock related data - Date, Open, Close, Volume, High, Low
+rawStockData          <- read.csv(file="stockData.csv", header=TRUE, sep=",")
+
+#RawProcessedDataNYT has news related data - Publised Date, Published Hour, Title
+rawProcessedData <- read.csv(file="YahooFinanceFeed.csv", header=FALSE, sep=",")
+
+#Adding column names to the dataframe
+rawProcessedData      <- setNames(rawProcessedData, c("Date", "Hour", "Title"))
+
+
+#TrendFunction - is a function that calculates trend
+trendFunction <- function(initial, final){
+  if(as.numeric(initial) < as.numeric(final)){
+    return("pos")
+  }else{
+    return("neg")
+  }
+}
+
+#TrendMagnitudeFunction - is a function that calculates percentagechange
+trendMagnitudeFunction <- function(initial, final){
+  return (((as.numeric(final) - as.numeric(initial)) / as.numeric(initial)) * 100)
+}
+
+#Calculates the percentage change of the stock price and the trend when a news was published
+helper_data_frame   <- data.frame(matrix(ncol = 2))
+for(i in 1:NROW(rawProcessedData)){
+  for(j in 1:NROW(rawStockData)){
+    if(as.character(rawProcessedData$Date[i]) == as.character(rawStockData$Date[j])){
+      if(rawProcessedData$Hour[i] > 9 && rawProcessedData$Hour[i] < 16){
+        helper_data_frame[i, 1] <- trendFunction(rawStockData$Open[j], rawStockData$Close[j])
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(rawStockData$Open[j], rawStockData$Close[j])
+      }else if(rawProcessedData$Hour[i] > 15 && j != length(rawStockData)){
+        helper_data_frame[i, 1] <- trendFunction(rawStockData$Close[j], rawStockData$Open[j - 1])
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(rawStockData$Close[j], rawStockData$Open[j - 1])
+      }else if(rawProcessedData$Hour[i] < 10 && j != 0){
+        helper_data_frame[i, 1] <- trendFunction(rawStockData$Close[j + 1], rawStockData$Open[j])
+        helper_data_frame[i, 2] <- trendMagnitudeFunction(rawStockData$Close[j + 1], rawStockData$Open[j]) 
+      }
+    }else{
+      if((mdy(rawProcessedData$Date[i]) < mdy(rawStockData$Date[j])) && (mdy(rawProcessedData$Date[i]) > mdy(rawStockData$Date[j + 1]))){
+          helper_data_frame[i, 1] <- trendFunction(as.numeric(rawStockData$Close[j + 1]), as.numeric(rawStockData$Open[j]))
+          helper_data_frame[i, 2] <- trendMagnitudeFunction(as.numeric(rawStockData$Close[j + 1]), as.numeric(rawStockData$Open[j]))
+      }
+    }
+  }
+}
+
+#Trend - positive or negative
+#MagnitudeTrend - percentage trend of the stock when the news was published
+rawProcessedData[, "Trend"]           <- helper_data_frame[, 1]
+rawProcessedData[, "MagnitudeTrend"]  <- helper_data_frame[, 2]
+
+#The dataset is not in the order.
+#To get the dataset in the order below code is used
+orderedNewsYAHOO        <- tbl_df(rawProcessedData)
+orderedNewsYAHOO        <- arrange(orderedNewsYAHOO, desc(mdy(Date)), desc(as.numeric(Hour)))
+
+orderedNewsYAHOO        <- as.data.frame(orderedNewsYAHOO)
+
+#Reading the sentiment of news title present in the file - COntentSentimentAndScore
+#We are using ALchemy API to predict the sentiment
+sentiment_yahoo <- read.csv(file="YahooFinanceHeadlineSentimentScore.csv", header=TRUE, sep=",")
+
+predictor_sentiment_yahoo = data.frame(matrix(ncol = 2))
+
+for (i in 1:NROW(orderedNewsYAHOO)){
+  for(j in 1:NROW(sentiment_yahoo)){
+    if(as.character(orderedNewsYAHOO$Title[i]) == as.character(sentiment_yahoo$Headline[j])){
+      predictor_sentiment_yahoo[i, 1] <- as.character(orderedNewsYAHOO$Title[i])
+      if(as.character(sentiment_yahoo$sentiment_type[j]) != "neutral"){
+        predictor_sentiment_yahoo[i, 2] <- as.character(sentiment_yahoo$sentiment_type[j])
+      }else{
+        if(as.numeric(sentiment_yahoo$sentiment_score[j]) < 0){
+          predictor_sentiment_yahoo[i, 2] <- "negative"
+        }else{
+          predictor_sentiment_yahoo[i, 2] <- "positive"
+        }
+      }
+    }
+  }
+}
+
+orderedNewsYAHOO[, "sentiment"] <- predictor_sentiment_yahoo[, 2]
+
+
+#Creating a dataframe that will have title and the sentiment.
+#This dataframe is fed to the SVM classifier
+help_label <- data.frame(matrix(ncol = 2))
+
+#Assigning column names to the dataset
+help_label <- setNames(help_label, c("Title", "Sentiment"))
+
+#Convert positive - 1, negative - 0
+for(i in 1:NROW(predictor_sentiment_yahoo)){
+  help_label[i, 1] <- as.character(predictor_sentiment_yahoo$X1[i])
+  if(as.character(predictor_sentiment_yahoo$X2[i]) == "positive"){
+    help_label[i, 2] <- 1
+  }else{
+    help_label[i, 2] <- 0
+  }
+}
+
+#Reversing the order of the rows
+#This is done because initiall dataset starts from the latest to oldest
+#In ordere to feed the dataset, we should have dataset that starts from the oldest to the latest
+help_label <- help_label[rev(rownames(help_label)),]
+orderedNewsYAHOO <- orderedNewsYAHOO[rev(rownames(orderedNewsYAHOO)),]
+
+#Dividing data into News title and Sentiment
+train_out_yahoo.data <- help_label$Sentiment
+train_txt_yahoo.data <- help_label$Title
+
+#Size of the sample dataset
+train.num_yahoo   <- 81
+
+#Building SVM Classifier by using unigram
+#Dataset is divided in the ratio 60 : 40
+#60 percent of the dataset is used to train SVM classifier
+#40 percent of the dataset is considered as testing dataset
+#Unigram
+matrix_1_yahoo <- create_matrix(train_txt_yahoo.data, language='english', removeNumbers=TRUE, stemWords=TRUE, removePunctuation=TRUE, toLower = TRUE, ngramLength = 1)
+container_1_yahoo <- create_container(matrix_1_yahoo, t(train_out_yahoo.data), trainSize = 1:(train.num_yahoo - 37), testSize = (train.num_yahoo - 36):train.num_yahoo, virgin = FALSE)
+
+svm.model_1_yahoo   <- train_model(container_1_yahoo, "SVM")
+svm.result_1_yahoo  <- classify_model(container_1_yahoo, svm.model_1_yahoo)
+
+svm_analytic_1_yahoo <- create_analytics(container_1_yahoo, svm.result_1_yahoo)
+
+#SVM Classifier - Precision and Recall for Negative sentiment and Positive Sentiment 
+#1 - Positive Sentiment
+#0 - Negative Sentiment
+svm_analytic_1_yahoo
+
+# push - push to the end of the list
+push <- function(list, element){
+  list <- c(list, element)
+  return(unlist(list))
+}
+
+#CreateNegativeList is a function where it gets percentage change of the most recent 10 negative sentiment news from the past dataset
+createNegativeList_yahoo <- function(index){
+  negativelist <- list()
+  while(index > 0){
+    if(orderedNewsYAHOO$sentiment[index] == "negative" && (NROW(unlist(negativelist)) < 10)){
+      negativelist <- push(negativelist, orderedNewsYAHOO$MagnitudeTrend[index])
+    }else if(NROW(unlist(negativelist)) == 10){
+      break
+    }
+    index <- index - 1
+  }
+  return(unlist(negativelist))
+}
+
+#CreatePositiveList is a function where it gets percentage change of the most recent 10 positive sentiment news from the past dataset
+createPositiveList_yahoo <- function(index){
+  positivelist <- list()
+  while(index > 0){
+    if(orderedNewsYAHOO$sentiment[index] == "positive" && (NROW(unlist(positivelist)) < 10)){
+      positivelist <- push(positivelist, orderedNewsYAHOO$MagnitudeTrend[index])
+    }else if(NROW(unlist(positivelist)) == 10){
+      break
+    }
+    index <- index - 1
+  }
+  return(positivelist)
+}
+
+
+#Calculate_wma - is a function which calculates weighted moving average based on the sentiment predicted by the SVM classifier
+#When the SVM classifier predicts negative, then calculate_wma function calls createNegativeList and calculates weighted moving average for the recent negative news from the past dataset.
+#Similarly, when the classifier predicts positive, then calculate_wma function class createPositiveList and calculate weighted moving average for the recent positive news from the past dataset.
+#Weights - 10/55, 9/55, 8/55, 7/55, 6/55, 5/55, 4/55, 3/55, 2/55, 1/55
+#more weight is added to the most recent news and the weight gradually fades out linearly.
+
+calculate_wma_yahoo <- function(testingValue, index){
+  if(testingValue == 0){
+    helper_list <- createNegativeList_yahoo(index - 1)
+  }else if(testingValue == 1){
+    helper_list <- createPositiveList_yahoo(index - 1)
+  }
+  value <- (helper_list[1] * (10 / 55)) + (helper_list[2] * (9 / 55)) + (helper_list[3] * (8 / 55)) + (helper_list[4] * (7 / 55)) + (helper_list[5] * (6 / 55)) + (helper_list[6] * (5 / 55)) + (helper_list[7] * (4 / 55)) + (helper_list[8] * (3 / 55)) + (helper_list[9] * (2 / 55)) + (helper_list[10] * (1 / 55))
+  return(value)
+}
+
+#final_result is a list that contains the predicted percentage change of yahoo stock with respect to the predicted sentiment from SVM classifier
+final_result_yahoo <- list()
+
+for(i in 1:NROW(svm.result_1_yahoo)){
+  final_result_yahoo <- push(final_result_yahoo, calculate_wma_yahoo(svm.result_1_yahoo$SVM_LABEL[i], 44 + i))
+}
+
+#Grouped Bar Graph
+#Plot that tells how our model has predicted the percentage change of the stock price of yahoo based on the sentiment of SVM Classifier and also the actual percentage change that happened when the news was published.
+datelist <- list()
+for(i in 45:NROW(orderedNewsYAHOO$Date)){
+     datelist[length(datelist) + 1] <- list(paste(as.character(mdy(orderedNewsYAHOO$Date[i])), " - ", as.character(i)))
+ }
+datelist <- unlist(datelist)
+
+f1 <- list(
+  family = "Arial, sans-serif",
+  size = 18,
+  color = "blue"
+)
+
+f2 <- list(
+  family = "Arial, sans-serif",
+  size = 10,
+  color = "black"
+)
+
+ax <- list(
+  title = "Date",
+  titlefont = f1,
+  ticks = "outside",
+  tickangle = 30,
+  tickfont = f2
+)
+data = data.frame(datelist, orderedNewsYAHOO$MagnitudeTrend[45:81], final_result_yahoo)
+p <- plot_ly(data, x = ~datelist, y = ~orderedNewsYAHOO$MagnitudeTrend[45:81], type = 'bar', name = "Actual Percentage change") %>% add_trace(y = ~final_result_yahoo, name = "Predicted Percentage change") %>% layout(yaxis = list(title = 'PercentageChange'), xaxis = ax, barmode = 'group', bargap = 0.5)
+p
+
+#Evaluation of our model
+final_help_data_frame <- data.frame(matrix(ncol = 2))
+final_help_data_frame <- setNames(final_help_data_frame, c("ActualTrend", "PredictedTrend"))
+for(i in 1:NROW(final_result_yahoo)){
+  if(final_result_yahoo[i] < 0){
+    final_help_data_frame[i, 2] <- "negative"
+  }else{
+    final_help_data_frame[i, 2] <- "positive"
+  }
+  final_help_data_frame[i, 1] <- orderedNewsYAHOO$Trend[44 + i]
+}
+
+
+#count_tn - has how many true negatives are present
+#count_tp - has how many true positives are present
+#count_fp - has how many false positives are present
+#count_fn - has how many false negatives are present
+count_tn <- 0
+count_tp <- 0
+count_fp <- 0
+count_fn <- 0
+for(i in 1:NROW(final_help_data_frame)){
+  if(final_help_data_frame$ActualTrend[i] == "neg" && final_help_data_frame$PredictedTrend[i] == "negative"){
+    count_tn <- count_tn + 1
+  }else if(final_help_data_frame$ActualTrend[i] == "pos" && final_help_data_frame$PredictedTrend[i] == "positive"){
+    count_tp <- count_tp + 1
+  }else if(final_help_data_frame$PredictedTrend[i] == "positive" && final_help_data_frame$ActualTrend[i] == "neg"){
+    count_fp <- count_fp + 1
+  }else if(final_help_data_frame$PredictedTrend[i] == "negative" && final_help_data_frame$ActualTrend[i] == "pos"){
+    count_fn <- count_fn + 1
+  }
+}
+
+#Positives
+#Precision
+pp <- count_tp / (count_tp + count_fp)
+pp
+#Recall
+rp <- count_tp / (count_tp + count_fn)
+rp
+#F1-measure
+f1p <- (2 * pp * rp) / (pp + rp)
+f1p
+
+#Negatives
+#Precision
+pn <- count_tn / (count_tn + count_fn)
+pn
+#Recall
+rn <- count_tn / (count_tn + count_fp)
+rn
+
+#F1-measure
+f1n <- (2 * pn * rn) / (pn + rn)
+f1n
+
